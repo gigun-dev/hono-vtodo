@@ -1,7 +1,7 @@
 import type { Context } from "hono";
 
-import type { CaldavProject, CaldavTask, CaldavUser } from "./schema";
-import { buildCalendarData } from "./ical";
+import type { CaldavProject, CaldavTask, CaldavUser } from "./schema.js";
+import { buildCalendarData } from "./ical.js";
 
 const DAV_NS = "DAV:";
 const CALDAV_NS = "urn:ietf:params:xml:ns:caldav";

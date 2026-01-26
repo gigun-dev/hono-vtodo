@@ -2,13 +2,12 @@ import type { Context, Hono } from "hono";
 import { decodeBase64 } from "hono/utils/encode";
 
 import { authenticateBasicUser } from "../auth/caldav-token";
-import type { CaldavUser } from "./schema";
-import type { CaldavEnv } from "../types/env";
+import type { CaldavUser } from "./schema.js";
 import { withDb } from "../db/client";
 import {
 	buildCalendarData,
 	parseVtodo,
-} from "./ical";
+} from "./ical.js";
 import {
 	buildCalendarCollectionResponse,
 	buildCalendarMultigetResponse,
@@ -20,7 +19,7 @@ import {
 	buildTaskResponse,
 	buildUnauthorizedResponse,
 	getDepthHeader,
-} from "./xml";
+} from "./xml.js";
 import {
 	createTask,
 	deleteTask,
@@ -29,7 +28,7 @@ import {
 	getTaskByUid,
 	getTasksForProject,
 	updateTask,
-} from "./storage";
+} from "./storage.js";
 
 const DAV_HEADERS = {
 	DAV: "1, 2, calendar-access",
@@ -47,7 +46,7 @@ function parseBasicAuth(header: string | undefined): {
 	if (!scheme || scheme.toLowerCase() !== "basic" || !value) {
 		return null;
 	}
-	const decoded = decodeBase64(value);
+	const decoded = new TextDecoder().decode(decodeBase64(value));
 	const idx = decoded.indexOf(":");
 	if (idx === -1) {
 		return null;
@@ -59,7 +58,7 @@ function parseBasicAuth(header: string | undefined): {
 }
 
 async function requireAuth(
-	c: Context<{ Bindings: CaldavEnv }>,
+	c: Context<{ Bindings: CloudflareBindings }>,
 ): Promise<CaldavUser | null> {
 	const auth = parseBasicAuth(c.req.header("authorization"));
 	if (!auth) {
@@ -70,7 +69,7 @@ async function requireAuth(
 	);
 }
 
-export function registerCaldavRoutes(app: Hono<{ Bindings: CaldavEnv }>) {
+export function registerCaldavRoutes(app: Hono<{ Bindings: CloudflareBindings }>) {
 	app.on("OPTIONS", "/dav/*", (c) =>
 		c.body(null, 204, DAV_HEADERS),
 	);

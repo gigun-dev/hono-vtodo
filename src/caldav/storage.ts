@@ -7,7 +7,7 @@ import type {
 	CaldavRelation,
 	CaldavTask,
 	CaldavTaskInput,
-} from "./schema";
+} from "./schema.js";
 
 const DEFAULT_REPEAT_MODE = "default";
 

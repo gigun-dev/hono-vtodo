@@ -1,6 +1,12 @@
-import * as ICAL from "ical.js";
+import ICAL from "ical.js";
 
-import type { CaldavLabel, CaldavReminder, CaldavRelation, CaldavTask, CaldavTaskInput } from "./schema";
+import type {
+	CaldavLabel,
+	CaldavReminder,
+	CaldavRelation,
+	CaldavTask,
+	CaldavTaskInput,
+} from "./schema.js";
 
 function mapPriorityToCaldav(priority: number | null): number | null {
 	if (!priority) {
@@ -41,8 +47,8 @@ function parseVtodoPriority(priority: number | null): number | null {
 	}
 }
 
-function toJsDate(value: ICAL.Time | null | undefined): Date | null {
-	if (!value) {
+function toJsDate(value: unknown): Date | null {
+	if (!value || !(value instanceof ICAL.Time)) {
 		return null;
 	}
 	return value.toJSDate();
@@ -157,7 +163,7 @@ function parseCategories(vtodo: ICAL.Component): CaldavLabel[] {
 		return [];
 	}
 	const values = prop.getValues();
-	return values.map((value) => ({
+	return values.map((value: unknown) => ({
 		id: 0,
 		title: String(value),
 	}));
