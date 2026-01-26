@@ -19,7 +19,11 @@ function xmlEscape(value: string): string {
 }
 
 function href(path: string): string {
-	return path.startsWith("/") ? path : `/${path}`;
+	const normalized = path.startsWith("/") ? path : `/${path}`;
+	if (normalized.endsWith("/") || normalized.endsWith(".ics")) {
+		return normalized;
+	}
+	return `${normalized}/`;
 }
 
 function propstatOk(props: string): string {
@@ -39,9 +43,22 @@ function responseFor(hrefValue: string, props: string): string {
   </d:response>`;
 }
 
-function multistatus(responses: string): string {
+function responseNotFound(hrefValue: string): string {
+	return `
+  <d:response>
+    <d:href>${xmlEscape(hrefValue)}</d:href>
+    <d:status>HTTP/1.1 404 Not Found</d:status>
+  </d:response>`;
+}
+
+function multistatus(responses: string, syncToken?: string): string {
+	const token = syncToken
+		? `
+  <d:sync-token>${xmlEscape(syncToken)}</d:sync-token>`
+		: "";
 	return `<?xml version="1.0" encoding="UTF-8"?>
 <d:multistatus xmlns:d="${DAV_NS}" xmlns:c="${CALDAV_NS}">
+${token}
 ${responses}
 </d:multistatus>`;
 }
@@ -223,11 +240,19 @@ export function buildTaskResponse(
 	);
 }
 
+export function buildPropPatchResponse(c: Context, hrefValue: string) {
+	return c.body(multistatus(responseFor(hrefValue, "")), 207, {
+		...DAV_HEADERS,
+		"Content-Type": "application/xml; charset=utf-8",
+	});
+}
+
 export function buildCalendarQueryResponse(
 	c: Context,
 	project: CaldavProject,
 	tasks: CaldavTask[],
 	withCalendarData: boolean,
+	syncToken?: string,
 ) {
 	let responses = "";
 	for (const task of tasks) {
@@ -242,7 +267,7 @@ export function buildCalendarQueryResponse(
 			taskProps(task) + extra,
 		);
 	}
-	return c.body(multistatus(responses), 207, {
+	return c.body(multistatus(responses, syncToken), 207, {
 		...DAV_HEADERS,
 		"Content-Type": "application/xml; charset=utf-8",
 	});
@@ -254,20 +279,37 @@ export function buildCalendarMultigetResponse(
 	tasks: CaldavTask[],
 	body: string,
 	withCalendarData: boolean,
+	syncToken?: string,
 ) {
 	const hrefs = Array.from(
-		body.matchAll(/<d:href>([^<]+)<\/d:href>/g),
+		body.matchAll(
+			/<(?:[^:>]+:)?href\b[^>]*>([^<]+)<\/(?:[^:>]+:)?href>/g,
+		),
 		(match) => match[1],
 	);
-	const taskMap = new Map(tasks.map((task) => [task.uid, task]));
+	const taskMap = new Map(
+		tasks.map((task) => [task.uid.toUpperCase(), task]),
+	);
 	let responses = "";
 	for (const hrefValue of hrefs) {
-		const uid = hrefValue.split("/").pop()?.replace(".ics", "");
+		let path = hrefValue;
+		if (hrefValue.startsWith("http://") || hrefValue.startsWith("https://")) {
+			try {
+				path = new URL(hrefValue).pathname;
+			} catch {
+				path = hrefValue;
+			}
+		}
+		const rawLast = path.split("/").pop();
+		const uid = rawLast
+			? decodeURIComponent(rawLast).replace(/\.ics$/i, "")
+			: "";
 		if (!uid) {
 			continue;
 		}
-		const task = taskMap.get(uid);
+		const task = taskMap.get(uid.toUpperCase());
 		if (!task) {
+			responses += responseNotFound(hrefValue);
 			continue;
 		}
 		const extra = withCalendarData
@@ -278,7 +320,7 @@ export function buildCalendarMultigetResponse(
 			: "";
 		responses += responseFor(hrefValue, taskProps(task) + extra);
 	}
-	return c.body(multistatus(responses), 207, {
+	return c.body(multistatus(responses, syncToken), 207, {
 		...DAV_HEADERS,
 		"Content-Type": "application/xml; charset=utf-8",
 	});

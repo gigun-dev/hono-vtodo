@@ -9,7 +9,7 @@ import type {
 } from "./schema.js";
 
 function mapPriorityToCaldav(priority: number | null): number | null {
-	if (!priority) {
+	if (priority == null) {
 		return null;
 	}
 	switch (priority) {
@@ -29,7 +29,7 @@ function mapPriorityToCaldav(priority: number | null): number | null {
 }
 
 function parseVtodoPriority(priority: number | null): number | null {
-	if (!priority) {
+	if (priority == null) {
 		return null;
 	}
 	switch (priority) {
@@ -179,7 +179,10 @@ export function parseVtodo(ics: string): CaldavTaskInput {
 
 	const uid = String(vtodo.getFirstPropertyValue("uid") ?? "");
 	const summary = String(vtodo.getFirstPropertyValue("summary") ?? "");
-	const description = String(vtodo.getFirstPropertyValue("description") ?? "");
+	const descriptionProp = vtodo.getFirstProperty("description");
+	const description = descriptionProp
+		? String(descriptionProp.getFirstValue() ?? "")
+		: undefined;
 	const status = String(vtodo.getFirstPropertyValue("status") ?? "");
 	const percentDoneRaw = Number(
 		vtodo.getFirstPropertyValue("percent-complete") ?? 0,

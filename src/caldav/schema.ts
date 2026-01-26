@@ -50,7 +50,11 @@ export type CaldavTask = {
 	relations: CaldavRelation[];
 };
 
-export type CaldavTaskInput = Omit<CaldavTask, "id" | "createdAt" | "updatedAt"> & {
+export type CaldavTaskInput = Omit<
+	CaldavTask,
+	"id" | "createdAt" | "updatedAt" | "description"
+> & {
+	description?: string;
 	createdAt?: Date;
 	updatedAt?: Date;
 };

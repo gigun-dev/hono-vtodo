@@ -16,6 +16,7 @@ import {
 	buildPrincipalResponse,
 	buildProjectCollectionResponse,
 	buildProjectResponse,
+	buildPropPatchResponse,
 	buildTaskResponse,
 	buildUnauthorizedResponse,
 	getDepthHeader,
@@ -31,8 +32,8 @@ import {
 } from "./storage.js";
 
 const DAV_HEADERS = {
-	DAV: "1, 2, calendar-access",
-	Allow: "OPTIONS, PROPFIND, REPORT, GET, PUT, DELETE",
+	DAV: "1, 2, calendar-access, sync-collection",
+	Allow: "OPTIONS, PROPFIND, REPORT, GET, PUT, DELETE, PROPPATCH",
 };
 
 function parseBasicAuth(header: string | undefined): {
@@ -55,6 +56,23 @@ function parseBasicAuth(header: string | undefined): {
 		username: decoded.slice(0, idx),
 		password: decoded.slice(idx + 1),
 	};
+}
+
+function normalizeHrefUid(hrefValue: string): string | null {
+	let path = hrefValue;
+	if (hrefValue.startsWith("http://") || hrefValue.startsWith("https://")) {
+		try {
+			path = new URL(hrefValue).pathname;
+		} catch {
+			path = hrefValue;
+		}
+	}
+	const rawLast = path.split("/").pop();
+	if (!rawLast) {
+		return null;
+	}
+	const uid = decodeURIComponent(rawLast).replace(/\.ics$/i, "");
+	return uid || null;
 }
 
 async function requireAuth(
@@ -82,31 +100,27 @@ export function registerCaldavRoutes(app: Hono<{ Bindings: CloudflareBindings }>
 		c.redirect("/dav/", 301),
 	);
 
-	app.on("PROPFIND", "/.well-known/caldav", async (c) => {
+	app.get("/.well-known/caldav/", (c) =>
+		c.redirect("/dav/", 301),
+	);
+
+	const handlePrincipal = async (c: Context<{ Bindings: CloudflareBindings }>) => {
 		const user = await requireAuth(c);
 		if (!user) {
 			return buildUnauthorizedResponse(c);
 		}
 		return buildPrincipalResponse(c, user);
-	});
+	};
 
-	app.on("PROPFIND", "/dav", async (c) => {
+	const handleEntry = async (c: Context<{ Bindings: CloudflareBindings }>) => {
 		const user = await requireAuth(c);
 		if (!user) {
 			return buildUnauthorizedResponse(c);
 		}
 		return buildEntryResponse(c, user);
-	});
+	};
 
-	app.on("PROPFIND", "/dav/principals/:username", async (c) => {
-		const user = await requireAuth(c);
-		if (!user) {
-			return buildUnauthorizedResponse(c);
-		}
-		return buildPrincipalResponse(c, user);
-	});
-
-	app.on("PROPFIND", "/dav/projects", async (c) => {
+	const handleProjects = async (c: Context<{ Bindings: CloudflareBindings }>) => {
 		const user = await requireAuth(c);
 		if (!user) {
 			return buildUnauthorizedResponse(c);
@@ -116,9 +130,9 @@ export function registerCaldavRoutes(app: Hono<{ Bindings: CloudflareBindings }>
 			const projects = await getProjectsForUser(client, user.id);
 			return buildProjectCollectionResponse(c, user, projects, depth);
 		});
-	});
+	};
 
-	app.on("PROPFIND", "/dav/projects/:projectId", async (c) => {
+	const handleProject = async (c: Context<{ Bindings: CloudflareBindings }>) => {
 		const user = await requireAuth(c);
 		if (!user) {
 			return buildUnauthorizedResponse(c);
@@ -139,14 +153,22 @@ export function registerCaldavRoutes(app: Hono<{ Bindings: CloudflareBindings }>
 			}
 			return buildProjectResponse(c, project);
 		});
-	});
+	};
 
-	app.on("REPORT", "/dav/projects/:projectId", async (c) => {
+	const handleReport = async (c: Context<{ Bindings: CloudflareBindings }>) => {
 		const user = await requireAuth(c);
 		if (!user) {
 			return buildUnauthorizedResponse(c);
 		}
 		const body = await c.req.text();
+		console.log("caldav_report_body", body);
+		const isSyncCollection = body.includes("sync-collection");
+		const hasCalendarData = body.includes("calendar-data");
+		const isMultiget = body.includes("calendar-multiget");
+		const syncTokenMatch =
+			body.match(/<d:sync-token>([^<]+)<\/d:sync-token>/i) ??
+			body.match(/<sync-token>([^<]+)<\/sync-token>/i);
+		const requestSyncToken = syncTokenMatch?.[1];
 		return await withDb(c.env, async (client) => {
 			const project = await getProjectById(
 				client,
@@ -157,14 +179,66 @@ export function registerCaldavRoutes(app: Hono<{ Bindings: CloudflareBindings }>
 				return c.text("Project not found", 404);
 			}
 			const tasks = await getTasksForProject(client, project.id);
-			const withCalendarData = body.includes("calendar-data");
-			if (body.includes("calendar-multiget")) {
+			const withCalendarData = true;
+			const syncToken = isSyncCollection
+				? String(
+						Math.max(
+							project.updatedAt.getTime(),
+							...tasks.map((task) => task.updatedAt.getTime()),
+						),
+					)
+				: undefined;
+			console.log("caldav_report", {
+				projectId: project.id,
+				isSyncCollection,
+				isMultiget,
+				hasCalendarData,
+				taskCount: tasks.length,
+				requestSyncToken,
+			});
+			if (isMultiget) {
+				const hrefs = Array.from(
+					body.matchAll(
+						/<(?:[^:>]+:)?href\b[^>]*>([^<]+)<\/(?:[^:>]+:)?href>/g,
+					),
+					(match) => match[1],
+				);
+				const taskUidSet = new Set(
+					tasks.map((task) => task.uid.toUpperCase()),
+				);
+				let matchedCount = 0;
+				let missingCount = 0;
+				const missingSamples: string[] = [];
+				for (const hrefValue of hrefs) {
+					const uid = normalizeHrefUid(hrefValue);
+					if (!uid) {
+						missingCount += 1;
+						if (missingSamples.length < 5) {
+							missingSamples.push(hrefValue);
+						}
+						continue;
+					}
+					if (taskUidSet.has(uid.toUpperCase())) {
+						matchedCount += 1;
+					} else {
+						missingCount += 1;
+						if (missingSamples.length < 5) {
+							missingSamples.push(hrefValue);
+						}
+					}
+				}
+				console.log(
+					`caldav_report_multiget requested=${hrefs.length} matched=${matchedCount} missing=${missingCount} samples=${JSON.stringify(
+						missingSamples,
+					)}`,
+				);
 				return buildCalendarMultigetResponse(
 					c,
 					project,
 					tasks,
 					body,
 					withCalendarData,
+					syncToken,
 				);
 			}
 			return buildCalendarQueryResponse(
@@ -172,9 +246,44 @@ export function registerCaldavRoutes(app: Hono<{ Bindings: CloudflareBindings }>
 				project,
 				tasks,
 				withCalendarData,
+				syncToken,
 			);
 		});
-	});
+	};
+
+	const handleProjectPropPatch = async (
+		c: Context<{ Bindings: CloudflareBindings }>,
+	) => {
+		const user = await requireAuth(c);
+		if (!user) {
+			return buildUnauthorizedResponse(c);
+		}
+		return buildPropPatchResponse(
+			c,
+			`/dav/projects/${c.req.param("projectId")}/`,
+		);
+	};
+
+	app.on("PROPFIND", "/.well-known/caldav", handlePrincipal);
+	app.on("PROPFIND", "/.well-known/caldav/", handlePrincipal);
+
+	app.on("PROPFIND", "/dav", handleEntry);
+	app.on("PROPFIND", "/dav/", handleEntry);
+
+	app.on("PROPFIND", "/dav/principals/:username", handlePrincipal);
+	app.on("PROPFIND", "/dav/principals/:username/", handlePrincipal);
+
+	app.on("PROPFIND", "/dav/projects", handleProjects);
+	app.on("PROPFIND", "/dav/projects/", handleProjects);
+
+	app.on("PROPFIND", "/dav/projects/:projectId", handleProject);
+	app.on("PROPFIND", "/dav/projects/:projectId/", handleProject);
+
+	app.on("REPORT", "/dav/projects/:projectId", handleReport);
+	app.on("REPORT", "/dav/projects/:projectId/", handleReport);
+
+	app.on("PROPPATCH", "/dav/projects/:projectId", handleProjectPropPatch);
+	app.on("PROPPATCH", "/dav/projects/:projectId/", handleProjectPropPatch);
 
 	app.get("/dav/projects/:projectId/:uid", async (c) => {
 		const user = await requireAuth(c);
@@ -233,7 +342,15 @@ export function registerCaldavRoutes(app: Hono<{ Bindings: CloudflareBindings }>
 			return buildUnauthorizedResponse(c);
 		}
 		const content = await c.req.text();
-		const parsed = parseVtodo(content);
+		let parsed;
+		try {
+			parsed = parseVtodo(content);
+		} catch (error) {
+			return c.text(
+				error instanceof Error ? error.message : "Invalid VTODO",
+				400,
+			);
+		}
 		return await withDb(c.env, async (client) => {
 			const project = await getProjectById(
 				client,
@@ -245,11 +362,14 @@ export function registerCaldavRoutes(app: Hono<{ Bindings: CloudflareBindings }>
 			}
 			const uid = c.req.param("uid").replace(/\.ics$/, "");
 			const existing = await getTaskByUid(client, project.id, uid);
-			const taskInput = {
+		const taskInput = {
 				...parsed,
 				projectId: project.id,
 				uid,
 			};
+		if (existing && parsed.description === undefined) {
+			taskInput.description = existing.description;
+		}
 			const task = existing
 				? await updateTask(client, user.id, existing.id, taskInput)
 				: await createTask(client, user.id, taskInput);

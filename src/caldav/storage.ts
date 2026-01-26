@@ -192,6 +192,20 @@ export async function createTask(
 				repeat_mode, created_at, updated_at
 			)
 			values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+			on conflict (uid) do update
+			  set title = excluded.title,
+			      description = excluded.description,
+			      due_at = excluded.due_at,
+			      start_at = excluded.start_at,
+			      end_at = excluded.end_at,
+			      completed_at = excluded.completed_at,
+			      priority = excluded.priority,
+			      percent_done = excluded.percent_done,
+			      color = excluded.color,
+			      repeat_after = excluded.repeat_after,
+			      repeat_mode = excluded.repeat_mode,
+			      updated_at = excluded.updated_at
+			where caldav_tasks.project_id = excluded.project_id
 			returning *`,
 			[
 				input.projectId,
@@ -211,7 +225,15 @@ export async function createTask(
 				updatedAt,
 			],
 		);
-		const task = normalizeTaskRow(insert.rows[0]);
+		let task: CaldavTask | null = null;
+		if (insert.rows.length > 0) {
+			task = normalizeTaskRow(insert.rows[0]);
+		} else {
+			task = await getTaskByUid(client, input.projectId, uid);
+		}
+		if (!task) {
+			throw new Error("Task UID already exists in another project.");
+		}
 		task.labels = await upsertLabels(client, userId, input.labels ?? []);
 		await replaceTaskLabels(client, task.id, task.labels);
 		task.reminders = await replaceTaskReminders(
