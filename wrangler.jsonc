@@ -10,7 +10,7 @@
 			"id": "afbaaf723cb64e37aa06d388f0a02bbe",
 
 			// Optional. Can be used to connect to a local database for local development with `wrangler dev`
-			"localConnectionString": "<LOCAL_CONNECTION_STRING_FOR_LOCAL_DEVELOPMENT_HERE>",
+			// "localConnectionString": "<LOCAL_CONNECTION_STRING_FOR_LOCAL_DEVELOPMENT_HERE>",
 		},
 	],
 	// "vars": {
