@@ -1,0 +1,19 @@
+{
+	"name": "vtodo",
+	"type": "module",
+	"scripts": {
+		"dev": "wrangler dev",
+		"deploy": "wrangler deploy --minify",
+		"cf-typegen": "wrangler types --env-interface CloudflareBindings"
+	},
+	"dependencies": {
+		"hono": "^4.11.5",
+		"ical.js": "^2.2.1",
+		"pg": "^8.17.2"
+	},
+	"devDependencies": {
+		"@types/pg": "^8.16.0",
+		"prettier": "^3.8.1",
+		"wrangler": "^4.4.0"
+	}
+}
