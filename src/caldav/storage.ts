@@ -9,6 +9,11 @@ import type {
 	CaldavTaskInput,
 } from "./schema.js";
 
+export type CaldavTaskDeletion = {
+	uid: string;
+	deletedAt: Date;
+};
+
 const DEFAULT_REPEAT_MODE = "default";
 
 function toDate(value: string | null): Date | null {
@@ -31,6 +36,8 @@ function normalizeTaskRow(row: any): CaldavTask {
 		color: row.color ?? null,
 		repeatAfter: row.repeat_after ?? null,
 		repeatMode: row.repeat_mode ?? null,
+		sequence: row.sequence ?? 0,
+		dtstamp: new Date(row.dtstamp),
 		createdAt: new Date(row.created_at),
 		updatedAt: new Date(row.updated_at),
 		labels: [],
@@ -44,7 +51,7 @@ export async function getProjectsForUser(
 	userId: string,
 ): Promise<CaldavProject[]> {
 	const result = await client.query(
-		`select id, name, owner_id, created_at, updated_at
+		`select id, name, owner_id, ctag, created_at, updated_at
 		   from caldav_projects
 		  where owner_id = $1
 		  order by id asc`,
@@ -54,6 +61,7 @@ export async function getProjectsForUser(
 		id: row.id,
 		name: row.name,
 		ownerId: row.owner_id,
+		ctag: String(row.ctag),
 		createdAt: new Date(row.created_at),
 		updatedAt: new Date(row.updated_at),
 	}));
@@ -65,7 +73,7 @@ export async function getProjectById(
 	projectId: number,
 ): Promise<CaldavProject | null> {
 	const result = await client.query(
-		`select id, name, owner_id, created_at, updated_at
+		`select id, name, owner_id, ctag, created_at, updated_at
 		   from caldav_projects
 		  where id = $1 and owner_id = $2`,
 		[projectId, userId],
@@ -77,6 +85,7 @@ export async function getProjectById(
 		id: result.rows[0].id,
 		name: result.rows[0].name,
 		ownerId: result.rows[0].owner_id,
+		ctag: String(result.rows[0].ctag),
 		createdAt: new Date(result.rows[0].created_at),
 		updatedAt: new Date(result.rows[0].updated_at),
 	};
@@ -98,6 +107,41 @@ export async function getTasksForProject(
 	return tasks;
 }
 
+export async function getTasksForProjectSince(
+	client: Client,
+	projectId: number,
+	since: Date,
+): Promise<CaldavTask[]> {
+	const result = await client.query(
+		`select *
+		   from caldav_tasks
+		  where project_id = $1
+		    and updated_at > $2
+		  order by updated_at desc`,
+		[projectId, since],
+	);
+	const tasks = result.rows.map(normalizeTaskRow);
+	await hydrateTaskMeta(client, tasks);
+	return tasks;
+}
+
+export async function getDeletedTasksForProject(
+	client: Client,
+	projectId: number,
+): Promise<CaldavTaskDeletion[]> {
+	const result = await client.query(
+		`select uid, deleted_at
+		   from caldav_task_deletions
+		  where project_id = $1
+		  order by deleted_at desc`,
+		[projectId],
+	);
+	return result.rows.map((row) => ({
+		uid: row.uid,
+		deletedAt: new Date(row.deleted_at),
+	}));
+}
+
 export async function getTaskByUid(
 	client: Client,
 	projectId: number,
@@ -106,7 +150,7 @@ export async function getTaskByUid(
 	const result = await client.query(
 		`select *
 		   from caldav_tasks
-		  where project_id = $1 and uid = $2`,
+		  where project_id = $1 and upper(uid) = upper($2)`,
 		[projectId, uid],
 	);
 	if (result.rows.length === 0) {
@@ -182,6 +226,7 @@ export async function createTask(
 	const uid = input.uid ?? crypto.randomUUID();
 	const createdAt = input.createdAt ?? now;
 	const updatedAt = input.updatedAt ?? now;
+	const dtstamp = createdAt;
 
 	await client.query("BEGIN");
 	try {
@@ -189,9 +234,9 @@ export async function createTask(
 			`insert into caldav_tasks (
 				project_id, uid, title, description, due_at, start_at, end_at,
 				completed_at, priority, percent_done, color, repeat_after,
-				repeat_mode, created_at, updated_at
+				repeat_mode, sequence, dtstamp, created_at, updated_at
 			)
-			values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+			values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
 			on conflict (uid) do update
 			  set title = excluded.title,
 			      description = excluded.description,
@@ -204,6 +249,7 @@ export async function createTask(
 			      color = excluded.color,
 			      repeat_after = excluded.repeat_after,
 			      repeat_mode = excluded.repeat_mode,
+			      sequence = caldav_tasks.sequence + 1,
 			      updated_at = excluded.updated_at
 			where caldav_tasks.project_id = excluded.project_id
 			returning *`,
@@ -221,6 +267,8 @@ export async function createTask(
 				input.color ?? null,
 				input.repeatAfter ?? null,
 				input.repeatMode ?? DEFAULT_REPEAT_MODE,
+				0,
+				dtstamp,
 				createdAt,
 				updatedAt,
 			],
@@ -245,6 +293,11 @@ export async function createTask(
 			client,
 			task.id,
 			input.relations ?? [],
+		);
+		await client.query(
+			`delete from caldav_task_deletions
+			  where project_id = $1 and uid = $2`,
+			[input.projectId, uid],
 		);
 		await client.query("COMMIT");
 		return task;
@@ -277,6 +330,7 @@ export async function updateTask(
 			        color = $9,
 			        repeat_after = $10,
 			        repeat_mode = $11,
+			        sequence = sequence + 1,
 			        updated_at = $12
 			  where id = $13
 			  returning *`,
@@ -317,20 +371,33 @@ export async function updateTask(
 	}
 }
 
-export async function deleteTask(client: Client, taskId: number) {
+export async function deleteTaskByUid(
+	client: Client,
+	projectId: number,
+	uid: string,
+): Promise<boolean> {
 	await client.query("BEGIN");
 	try {
-		await client.query("delete from caldav_task_labels where task_id = $1", [
-			taskId,
-		]);
-		await client.query("delete from caldav_task_reminders where task_id = $1", [
-			taskId,
-		]);
-		await client.query("delete from caldav_task_relations where task_id = $1", [
-			taskId,
-		]);
-		await client.query("delete from caldav_tasks where id = $1", [taskId]);
+		const deleted = await client.query(
+			`delete from caldav_tasks
+			  where project_id = $1
+			    and upper(uid) = upper($2)
+			  returning id`,
+			[projectId, uid],
+		);
+		if (deleted.rows.length === 0) {
+			await client.query("ROLLBACK");
+			return false;
+		}
+		await client.query(
+			`insert into caldav_task_deletions (project_id, uid, deleted_at)
+			 values ($1, $2, now())
+			 on conflict (project_id, uid)
+			 do update set deleted_at = excluded.deleted_at`,
+			[projectId, uid],
+		);
 		await client.query("COMMIT");
+		return true;
 	} catch (error) {
 		await client.query("ROLLBACK");
 		throw error;

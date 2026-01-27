@@ -8,6 +8,7 @@ export type CaldavProject = {
 	id: number;
 	name: string;
 	ownerId: string;
+	ctag: string;
 	createdAt: Date;
 	updatedAt: Date;
 };
@@ -43,6 +44,8 @@ export type CaldavTask = {
 	color: string | null;
 	repeatAfter: number | null;
 	repeatMode: "default" | "month" | "from_current" | null;
+	sequence: number;
+	dtstamp: Date;
 	createdAt: Date;
 	updatedAt: Date;
 	labels: CaldavLabel[];
@@ -52,7 +55,7 @@ export type CaldavTask = {
 
 export type CaldavTaskInput = Omit<
 	CaldavTask,
-	"id" | "createdAt" | "updatedAt" | "description"
+	"id" | "sequence" | "dtstamp" | "createdAt" | "updatedAt" | "description"
 > & {
 	description?: string;
 	createdAt?: Date;

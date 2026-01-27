@@ -29,7 +29,7 @@ function mapPriorityToCaldav(priority: number | null): number | null {
 }
 
 function parseVtodoPriority(priority: number | null): number | null {
-	if (priority == null) {
+	if (priority == null || priority === 0) {
 		return null;
 	}
 	switch (priority) {
@@ -187,9 +187,13 @@ export function parseVtodo(ics: string): CaldavTaskInput {
 	const percentDoneRaw = Number(
 		vtodo.getFirstPropertyValue("percent-complete") ?? 0,
 	);
-	const priority = parseVtodoPriority(
-		Number(vtodo.getFirstPropertyValue("priority") ?? 0),
-	);
+	const priorityProp = vtodo.getFirstProperty("priority");
+	const priorityRaw = priorityProp
+		? Number(priorityProp.getFirstValue() ?? NaN)
+		: null;
+	const priority = Number.isFinite(priorityRaw ?? NaN)
+		? parseVtodoPriority(priorityRaw)
+		: null;
 
 	const completedAt = toJsDate(vtodo.getFirstPropertyValue("completed"));
 	const dueAt = toJsDate(vtodo.getFirstPropertyValue("due"));
@@ -236,8 +240,9 @@ export function buildCalendarData(projectName: string, task: CaldavTask): string
 	vtodo.updatePropertyWithValue("uid", task.uid);
 	vtodo.updatePropertyWithValue(
 		"dtstamp",
-		ICAL.Time.fromJSDate(task.updatedAt, true),
+		ICAL.Time.fromJSDate(task.dtstamp, true),
 	);
+	vtodo.updatePropertyWithValue("sequence", task.sequence);
 	vtodo.updatePropertyWithValue(
 		"last-modified",
 		ICAL.Time.fromJSDate(task.updatedAt, true),
@@ -270,12 +275,6 @@ export function buildCalendarData(projectName: string, task: CaldavTask): string
 		vtodo.updatePropertyWithValue(
 			"dtstart",
 			ICAL.Time.fromJSDate(task.startAt, true),
-		);
-	}
-	if (task.endAt) {
-		vtodo.updatePropertyWithValue(
-			"dtend",
-			ICAL.Time.fromJSDate(task.endAt, true),
 		);
 	}
 	if (task.repeatMode === "month" && (task.dueAt || task.startAt)) {

@@ -51,22 +51,34 @@ function responseNotFound(hrefValue: string): string {
   </d:response>`;
 }
 
+function responseGone(hrefValue: string): string {
+	return `
+  <d:response>
+    <d:href>${xmlEscape(hrefValue)}</d:href>
+    <d:status>HTTP/1.1 410 Gone</d:status>
+  </d:response>`;
+}
+
 function multistatus(responses: string, syncToken?: string): string {
 	const token = syncToken
 		? `
   <d:sync-token>${xmlEscape(syncToken)}</d:sync-token>`
 		: "";
 	return `<?xml version="1.0" encoding="UTF-8"?>
-<d:multistatus xmlns:d="${DAV_NS}" xmlns:c="${CALDAV_NS}">
+<d:multistatus xmlns:d="${DAV_NS}" xmlns:c="${CALDAV_NS}" xmlns:cs="http://calendarserver.org/ns/">
 ${token}
 ${responses}
 </d:multistatus>`;
 }
 
-function collectionProps(displayName: string, resType: string, extra: string = ""): string {
+function collectionProps(displayName: string, resType: string, extra: string = "", ctag?: string): string {
+	const ctagProp = ctag
+		? `
+        <cs:getctag xmlns:cs="http://calendarserver.org/ns/">${xmlEscape(ctag)}</cs:getctag>`
+		: "";
 	return `
         <d:displayname>${xmlEscape(displayName)}</d:displayname>
-        <d:resourcetype>${resType}</d:resourcetype>
+        <d:resourcetype>${resType}</d:resourcetype>${ctagProp}
         ${extra}`.trimEnd();
 }
 
@@ -74,12 +86,12 @@ function etag(updatedAt: Date): string {
 	return `"${updatedAt.getTime()}"`;
 }
 
-function taskProps(task: CaldavTask): string {
-	const calendarData = buildCalendarData("", task);
+function taskProps(task: CaldavTask, calendarData?: string): string {
+	const content = calendarData ?? buildCalendarData("", task);
 	return `
         <d:getetag>${etag(task.updatedAt)}</d:getetag>
         <d:getcontenttype>text/calendar; charset=utf-8; component=VTODO</d:getcontenttype>
-        <d:getcontentlength>${calendarData.length}</d:getcontentlength>
+        <d:getcontentlength>${content.length}</d:getcontentlength>
         <d:getlastmodified>${task.updatedAt.toUTCString()}</d:getlastmodified>`;
 }
 
@@ -161,7 +173,7 @@ export function buildProjectCollectionResponse(
         </c:supported-calendar-component-set>`;
 			responses += responseFor(
 				href(`/dav/projects/${project.id}`),
-				collectionProps(project.name, resType, extra),
+				collectionProps(project.name, resType, extra, project.ctag),
 			);
 		}
 	}
@@ -180,6 +192,7 @@ export function buildProjectResponse(c: Context, project: CaldavProject) {
         <c:supported-calendar-component-set>
           <c:comp name="VTODO"/>
         </c:supported-calendar-component-set>`,
+		project.ctag,
 	);
 	return c.body(
 		multistatus(responseFor(href(`/dav/projects/${project.id}`), props)),
@@ -205,12 +218,14 @@ export function buildCalendarCollectionResponse(
         <c:supported-calendar-component-set>
           <c:comp name="VTODO"/>
         </c:supported-calendar-component-set>`,
+			project.ctag,
 		),
 	);
 	for (const task of tasks) {
+		const calendarData = buildCalendarData(project.name, task);
 		responses += responseFor(
 			href(`/dav/projects/${project.id}/${task.uid}.ics`),
-			taskProps(task),
+			taskProps(task, calendarData),
 		);
 	}
 	return c.body(multistatus(responses), 207, {
@@ -224,7 +239,7 @@ export function buildTaskResponse(
 	project: CaldavProject,
 	task: CaldavTask,
 ) {
-	const props = taskProps(task);
+	const props = taskProps(task, buildCalendarData(project.name, task));
 	return c.body(
 		multistatus(
 			responseFor(
@@ -256,15 +271,49 @@ export function buildCalendarQueryResponse(
 ) {
 	let responses = "";
 	for (const task of tasks) {
+		const calendarData = buildCalendarData(project.name, task);
 		const extra = withCalendarData
 			? `
         <c:calendar-data>${xmlEscape(
-				buildCalendarData(project.name, task),
+				calendarData,
 			)}</c:calendar-data>`
 			: "";
 		responses += responseFor(
 			href(`/dav/projects/${project.id}/${task.uid}.ics`),
-			taskProps(task) + extra,
+			taskProps(task, calendarData) + extra,
+		);
+	}
+	return c.body(multistatus(responses, syncToken), 207, {
+		...DAV_HEADERS,
+		"Content-Type": "application/xml; charset=utf-8",
+	});
+}
+
+export function buildSyncCollectionResponse(
+	c: Context,
+	project: CaldavProject,
+	tasks: CaldavTask[],
+	deletedUids: string[],
+	withCalendarData: boolean,
+	syncToken?: string,
+) {
+	let responses = "";
+	for (const task of tasks) {
+		const calendarData = buildCalendarData(project.name, task);
+		const extra = withCalendarData
+			? `
+        <c:calendar-data>${xmlEscape(
+				calendarData,
+			)}</c:calendar-data>`
+			: "";
+		responses += responseFor(
+			href(`/dav/projects/${project.id}/${task.uid}.ics`),
+			taskProps(task, calendarData) + extra,
+		);
+	}
+	for (const uid of deletedUids) {
+		responses += responseGone(
+			href(`/dav/projects/${project.id}/${uid}.ics`),
 		);
 	}
 	return c.body(multistatus(responses, syncToken), 207, {
@@ -277,6 +326,7 @@ export function buildCalendarMultigetResponse(
 	c: Context,
 	project: CaldavProject,
 	tasks: CaldavTask[],
+	deletedUids: string[],
 	body: string,
 	withCalendarData: boolean,
 	syncToken?: string,
@@ -290,6 +340,7 @@ export function buildCalendarMultigetResponse(
 	const taskMap = new Map(
 		tasks.map((task) => [task.uid.toUpperCase(), task]),
 	);
+	const deletedSet = new Set(deletedUids.map((uid) => uid.toUpperCase()));
 	let responses = "";
 	for (const hrefValue of hrefs) {
 		let path = hrefValue;
@@ -309,16 +360,20 @@ export function buildCalendarMultigetResponse(
 		}
 		const task = taskMap.get(uid.toUpperCase());
 		if (!task) {
-			responses += responseNotFound(hrefValue);
+			const normalized = uid.toUpperCase();
+			responses += deletedSet.has(normalized)
+				? responseGone(hrefValue)
+				: responseNotFound(hrefValue);
 			continue;
 		}
+		const calendarData = buildCalendarData(project.name, task);
 		const extra = withCalendarData
 			? `
         <c:calendar-data>${xmlEscape(
-				buildCalendarData(project.name, task),
+				calendarData,
 			)}</c:calendar-data>`
 			: "";
-		responses += responseFor(hrefValue, taskProps(task) + extra);
+		responses += responseFor(hrefValue, taskProps(task, calendarData) + extra);
 	}
 	return c.body(multistatus(responses, syncToken), 207, {
 		...DAV_HEADERS,

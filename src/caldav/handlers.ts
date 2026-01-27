@@ -12,6 +12,7 @@ import {
 	buildCalendarCollectionResponse,
 	buildCalendarMultigetResponse,
 	buildCalendarQueryResponse,
+	buildSyncCollectionResponse,
 	buildEntryResponse,
 	buildPrincipalResponse,
 	buildProjectCollectionResponse,
@@ -23,11 +24,12 @@ import {
 } from "./xml.js";
 import {
 	createTask,
-	deleteTask,
+	deleteTaskByUid,
 	getProjectById,
 	getProjectsForUser,
 	getTaskByUid,
 	getTasksForProject,
+	getDeletedTasksForProject,
 	updateTask,
 } from "./storage.js";
 
@@ -73,6 +75,10 @@ function normalizeHrefUid(hrefValue: string): string | null {
 	}
 	const uid = decodeURIComponent(rawLast).replace(/\.ics$/i, "");
 	return uid || null;
+}
+
+function normalizeUidParam(rawValue: string): string {
+	return decodeURIComponent(rawValue).replace(/\.ics$/i, "");
 }
 
 async function requireAuth(
@@ -179,12 +185,21 @@ export function registerCaldavRoutes(app: Hono<{ Bindings: CloudflareBindings }>
 				return c.text("Project not found", 404);
 			}
 			const tasks = await getTasksForProject(client, project.id);
+			const deletions = await getDeletedTasksForProject(client, project.id);
 			const withCalendarData = true;
+			const requestTokenMs = requestSyncToken
+				? Number(requestSyncToken)
+				: Number.NaN;
+			const since =
+				Number.isFinite(requestTokenMs) && requestTokenMs > 0
+					? new Date(requestTokenMs)
+					: null;
 			const syncToken = isSyncCollection
 				? String(
 						Math.max(
 							project.updatedAt.getTime(),
 							...tasks.map((task) => task.updatedAt.getTime()),
+							...deletions.map((entry) => entry.deletedAt.getTime()),
 						),
 					)
 				: undefined;
@@ -196,6 +211,24 @@ export function registerCaldavRoutes(app: Hono<{ Bindings: CloudflareBindings }>
 				taskCount: tasks.length,
 				requestSyncToken,
 			});
+			if (isSyncCollection) {
+				const tasksForResponse = since
+					? tasks.filter((task) => task.updatedAt > since)
+					: tasks;
+				const deletedUids = since
+					? deletions
+							.filter((entry) => entry.deletedAt > since)
+							.map((entry) => entry.uid)
+					: deletions.map((entry) => entry.uid);
+				return buildSyncCollectionResponse(
+					c,
+					project,
+					tasksForResponse,
+					deletedUids,
+					withCalendarData,
+					syncToken,
+				);
+			}
 			if (isMultiget) {
 				const hrefs = Array.from(
 					body.matchAll(
@@ -236,6 +269,7 @@ export function registerCaldavRoutes(app: Hono<{ Bindings: CloudflareBindings }>
 					c,
 					project,
 					tasks,
+					deletions.map((entry) => entry.uid),
 					body,
 					withCalendarData,
 					syncToken,
@@ -264,8 +298,12 @@ export function registerCaldavRoutes(app: Hono<{ Bindings: CloudflareBindings }>
 		);
 	};
 
-	app.on("PROPFIND", "/.well-known/caldav", handlePrincipal);
-	app.on("PROPFIND", "/.well-known/caldav/", handlePrincipal);
+	app.on("PROPFIND", "/.well-known/caldav", (c) =>
+		c.redirect("/dav/", 301),
+	);
+	app.on("PROPFIND", "/.well-known/caldav/", (c) =>
+		c.redirect("/dav/", 301),
+	);
 
 	app.on("PROPFIND", "/dav", handleEntry);
 	app.on("PROPFIND", "/dav/", handleEntry);
@@ -299,7 +337,7 @@ export function registerCaldavRoutes(app: Hono<{ Bindings: CloudflareBindings }>
 			if (!project) {
 				return c.text("Project not found", 404);
 			}
-			const uid = c.req.param("uid").replace(/\.ics$/, "");
+			const uid = normalizeUidParam(c.req.param("uid"));
 			const task = await getTaskByUid(client, project.id, uid);
 			if (!task) {
 				return c.text("Task not found", 404);
@@ -327,7 +365,7 @@ export function registerCaldavRoutes(app: Hono<{ Bindings: CloudflareBindings }>
 			if (!project) {
 				return c.text("Project not found", 404);
 			}
-			const uid = c.req.param("uid").replace(/\.ics$/, "");
+			const uid = normalizeUidParam(c.req.param("uid"));
 			const task = await getTaskByUid(client, project.id, uid);
 			if (!task) {
 				return c.text("Task not found", 404);
@@ -360,7 +398,7 @@ export function registerCaldavRoutes(app: Hono<{ Bindings: CloudflareBindings }>
 			if (!project) {
 				return c.text("Project not found", 404);
 			}
-			const uid = c.req.param("uid").replace(/\.ics$/, "");
+			const uid = normalizeUidParam(c.req.param("uid"));
 			const existing = await getTaskByUid(client, project.id, uid);
 		const taskInput = {
 				...parsed,
@@ -396,12 +434,15 @@ export function registerCaldavRoutes(app: Hono<{ Bindings: CloudflareBindings }>
 			if (!project) {
 				return c.text("Project not found", 404);
 			}
-			const uid = c.req.param("uid").replace(/\.ics$/, "");
-			const task = await getTaskByUid(client, project.id, uid);
-			if (!task) {
+			const uid = normalizeUidParam(c.req.param("uid"));
+			const deleted = await deleteTaskByUid(client, project.id, uid);
+			if (!deleted) {
+				console.log(
+					`caldav_delete_not_found projectId=${project.id} uid=${uid}`,
+				);
 				return c.text("Task not found", 404);
 			}
-			await deleteTask(client, task.id);
+			console.log(`caldav_delete projectId=${project.id} uid=${uid}`);
 			return c.body(null, 204);
 		});
 	});
