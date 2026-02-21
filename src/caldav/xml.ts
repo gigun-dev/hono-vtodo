@@ -71,7 +71,12 @@ ${responses}
 </d:multistatus>`;
 }
 
-function collectionProps(displayName: string, resType: string, extra: string = "", ctag?: string): string {
+function collectionProps(
+	displayName: string,
+	resType: string,
+	extra: string = "",
+	ctag?: string,
+): string {
 	const ctagProp = ctag
 		? `
         <cs:getctag xmlns:cs="http://calendarserver.org/ns/">${xmlEscape(ctag)}</cs:getctag>`
@@ -165,8 +170,7 @@ export function buildProjectCollectionResponse(
 
 	if (depth === "1") {
 		for (const project of projects) {
-			const resType =
-				"<d:collection/><c:calendar/>";
+			const resType = "<d:collection/><c:calendar/>";
 			const extra = `
         <c:supported-calendar-component-set>
           <c:comp name="VTODO"/>
@@ -184,16 +188,22 @@ export function buildProjectCollectionResponse(
 	});
 }
 
-export function buildProjectResponse(c: Context, project: CaldavProject) {
-	const props = collectionProps(
-		project.name,
-		"<d:collection/><c:calendar/>",
-		`
+const PROJECT_COLLECTION_EXTRA = `
         <c:supported-calendar-component-set>
           <c:comp name="VTODO"/>
-        </c:supported-calendar-component-set>`,
+        </c:supported-calendar-component-set>`;
+
+export function projectCollectionProps(project: CaldavProject): string {
+	return collectionProps(
+		project.name,
+		"<d:collection/><c:calendar/>",
+		PROJECT_COLLECTION_EXTRA,
 		project.ctag,
 	);
+}
+
+export function buildProjectResponse(c: Context, project: CaldavProject) {
+	const props = projectCollectionProps(project);
 	return c.body(
 		multistatus(responseFor(href(`/dav/projects/${project.id}`), props)),
 		207,
@@ -211,15 +221,7 @@ export function buildCalendarCollectionResponse(
 ) {
 	let responses = responseFor(
 		href(`/dav/projects/${project.id}`),
-		collectionProps(
-			project.name,
-			"<d:collection/><c:calendar/>",
-			`
-        <c:supported-calendar-component-set>
-          <c:comp name="VTODO"/>
-        </c:supported-calendar-component-set>`,
-			project.ctag,
-		),
+		projectCollectionProps(project),
 	);
 	for (const task of tasks) {
 		const calendarData = buildCalendarData(project.name, task);
@@ -242,10 +244,7 @@ export function buildTaskResponse(
 	const props = taskProps(task, buildCalendarData(project.name, task));
 	return c.body(
 		multistatus(
-			responseFor(
-				href(`/dav/projects/${project.id}/${task.uid}.ics`),
-				props,
-			),
+			responseFor(href(`/dav/projects/${project.id}/${task.uid}.ics`), props),
 		),
 		207,
 		{
@@ -255,8 +254,12 @@ export function buildTaskResponse(
 	);
 }
 
-export function buildPropPatchResponse(c: Context, hrefValue: string) {
-	return c.body(multistatus(responseFor(hrefValue, "")), 207, {
+export function buildPropPatchResponse(
+	c: Context,
+	hrefValue: string,
+	props?: string,
+) {
+	return c.body(multistatus(responseFor(hrefValue, props ?? "")), 207, {
 		...DAV_HEADERS,
 		"Content-Type": "application/xml; charset=utf-8",
 	});
@@ -274,9 +277,7 @@ export function buildCalendarQueryResponse(
 		const calendarData = buildCalendarData(project.name, task);
 		const extra = withCalendarData
 			? `
-        <c:calendar-data>${xmlEscape(
-				calendarData,
-			)}</c:calendar-data>`
+        <c:calendar-data>${xmlEscape(calendarData)}</c:calendar-data>`
 			: "";
 		responses += responseFor(
 			href(`/dav/projects/${project.id}/${task.uid}.ics`),
@@ -302,9 +303,7 @@ export function buildSyncCollectionResponse(
 		const calendarData = buildCalendarData(project.name, task);
 		const extra = withCalendarData
 			? `
-        <c:calendar-data>${xmlEscape(
-				calendarData,
-			)}</c:calendar-data>`
+        <c:calendar-data>${xmlEscape(calendarData)}</c:calendar-data>`
 			: "";
 		responses += responseFor(
 			href(`/dav/projects/${project.id}/${task.uid}.ics`),
@@ -312,9 +311,7 @@ export function buildSyncCollectionResponse(
 		);
 	}
 	for (const uid of deletedUids) {
-		responses += responseGone(
-			href(`/dav/projects/${project.id}/${uid}.ics`),
-		);
+		responses += responseGone(href(`/dav/projects/${project.id}/${uid}.ics`));
 	}
 	return c.body(multistatus(responses, syncToken), 207, {
 		...DAV_HEADERS,
@@ -332,14 +329,10 @@ export function buildCalendarMultigetResponse(
 	syncToken?: string,
 ) {
 	const hrefs = Array.from(
-		body.matchAll(
-			/<(?:[^:>]+:)?href\b[^>]*>([^<]+)<\/(?:[^:>]+:)?href>/g,
-		),
+		body.matchAll(/<(?:[^:>]+:)?href\b[^>]*>([^<]+)<\/(?:[^:>]+:)?href>/g),
 		(match) => match[1],
 	);
-	const taskMap = new Map(
-		tasks.map((task) => [task.uid.toUpperCase(), task]),
-	);
+	const taskMap = new Map(tasks.map((task) => [task.uid.toUpperCase(), task]));
 	const deletedSet = new Set(deletedUids.map((uid) => uid.toUpperCase()));
 	let responses = "";
 	for (const hrefValue of hrefs) {
@@ -369,9 +362,7 @@ export function buildCalendarMultigetResponse(
 		const calendarData = buildCalendarData(project.name, task);
 		const extra = withCalendarData
 			? `
-        <c:calendar-data>${xmlEscape(
-				calendarData,
-			)}</c:calendar-data>`
+        <c:calendar-data>${xmlEscape(calendarData)}</c:calendar-data>`
 			: "";
 		responses += responseFor(hrefValue, taskProps(task, calendarData) + extra);
 	}

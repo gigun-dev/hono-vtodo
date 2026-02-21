@@ -4,10 +4,7 @@ import { decodeBase64 } from "hono/utils/encode";
 import { authenticateBasicUser } from "../auth/caldav-token";
 import type { CaldavUser } from "./schema.js";
 import { withDb } from "../db/client";
-import {
-	buildCalendarData,
-	parseVtodo,
-} from "./ical.js";
+import { buildCalendarData, parseVtodo } from "./ical.js";
 import {
 	buildCalendarCollectionResponse,
 	buildCalendarMultigetResponse,
@@ -21,6 +18,7 @@ import {
 	buildTaskResponse,
 	buildUnauthorizedResponse,
 	getDepthHeader,
+	projectCollectionProps,
 } from "./xml.js";
 import {
 	createTask,
@@ -31,12 +29,44 @@ import {
 	getTasksForProject,
 	getDeletedTasksForProject,
 	updateTask,
+	updateProjectDisplayName,
 } from "./storage.js";
+
+const MAX_BODY_SIZE = 256 * 1024; // 256KB
+
+async function readBodyWithLimit(
+	c: Context<{ Bindings: CloudflareBindings }>,
+): Promise<{ body: string } | { error: Response }> {
+	const contentLength = c.req.header("content-length");
+	if (contentLength) {
+		const len = parseInt(contentLength, 10);
+		if (Number.isNaN(len) || len > MAX_BODY_SIZE) {
+			return { error: c.text("Request Entity Too Large", 413) };
+		}
+	}
+	const body = await c.req.text();
+	if (body.length > MAX_BODY_SIZE) {
+		return { error: c.text("Request Entity Too Large", 413) };
+	}
+	return { body };
+}
 
 const DAV_HEADERS = {
 	DAV: "1, 2, calendar-access, sync-collection",
 	Allow: "OPTIONS, PROPFIND, REPORT, GET, PUT, DELETE, PROPPATCH",
 };
+
+/** Parse PROPPATCH body (RFC 4918 propertyupdate), return displayname if set. */
+function parseProppatchDisplayName(body: string): string | null {
+	const m = body.match(
+		/<(?:[^:>]+:)?displayname[^>]*>([^<]*)<\/(?:[^:>]+:)?displayname>/i,
+	);
+	if (!m || m[1] === undefined) {
+		return null;
+	}
+	const value = m[1].trim();
+	return value === "" ? null : value;
+}
 
 function parseBasicAuth(header: string | undefined): {
 	username: string;
@@ -94,24 +124,22 @@ async function requireAuth(
 	);
 }
 
-export function registerCaldavRoutes(app: Hono<{ Bindings: CloudflareBindings }>) {
-	app.on("OPTIONS", "/dav/*", (c) =>
-		c.body(null, 204, DAV_HEADERS),
-	);
+export function registerCaldavRoutes(
+	app: Hono<{ Bindings: CloudflareBindings }>,
+) {
+	app.on("OPTIONS", "/dav/*", (c) => c.body(null, 204, DAV_HEADERS));
 
 	app.on("OPTIONS", "/.well-known/caldav", (c) =>
 		c.body(null, 204, DAV_HEADERS),
 	);
 
-	app.get("/.well-known/caldav", (c) =>
-		c.redirect("/dav/", 301),
-	);
+	app.get("/.well-known/caldav", (c) => c.redirect("/dav/", 301));
 
-	app.get("/.well-known/caldav/", (c) =>
-		c.redirect("/dav/", 301),
-	);
+	app.get("/.well-known/caldav/", (c) => c.redirect("/dav/", 301));
 
-	const handlePrincipal = async (c: Context<{ Bindings: CloudflareBindings }>) => {
+	const handlePrincipal = async (
+		c: Context<{ Bindings: CloudflareBindings }>,
+	) => {
 		const user = await requireAuth(c);
 		if (!user) {
 			return buildUnauthorizedResponse(c);
@@ -127,7 +155,9 @@ export function registerCaldavRoutes(app: Hono<{ Bindings: CloudflareBindings }>
 		return buildEntryResponse(c, user);
 	};
 
-	const handleProjects = async (c: Context<{ Bindings: CloudflareBindings }>) => {
+	const handleProjects = async (
+		c: Context<{ Bindings: CloudflareBindings }>,
+	) => {
 		const user = await requireAuth(c);
 		if (!user) {
 			return buildUnauthorizedResponse(c);
@@ -139,7 +169,9 @@ export function registerCaldavRoutes(app: Hono<{ Bindings: CloudflareBindings }>
 		});
 	};
 
-	const handleProject = async (c: Context<{ Bindings: CloudflareBindings }>) => {
+	const handleProject = async (
+		c: Context<{ Bindings: CloudflareBindings }>,
+	) => {
 		const user = await requireAuth(c);
 		if (!user) {
 			return buildUnauthorizedResponse(c);
@@ -167,7 +199,11 @@ export function registerCaldavRoutes(app: Hono<{ Bindings: CloudflareBindings }>
 		if (!user) {
 			return buildUnauthorizedResponse(c);
 		}
-		const body = await c.req.text();
+		const read = await readBodyWithLimit(c);
+		if ("error" in read) {
+			return read.error;
+		}
+		const body = read.body;
 		console.log("caldav_report_body", body);
 		const isSyncCollection = body.includes("sync-collection");
 		const hasCalendarData = body.includes("calendar-data");
@@ -237,9 +273,7 @@ export function registerCaldavRoutes(app: Hono<{ Bindings: CloudflareBindings }>
 					),
 					(match) => match[1],
 				);
-				const taskUidSet = new Set(
-					tasks.map((task) => task.uid.toUpperCase()),
-				);
+				const taskUidSet = new Set(tasks.map((task) => task.uid.toUpperCase()));
 				let matchedCount = 0;
 				let missingCount = 0;
 				const missingSamples: string[] = [];
@@ -293,18 +327,31 @@ export function registerCaldavRoutes(app: Hono<{ Bindings: CloudflareBindings }>
 		if (!user) {
 			return buildUnauthorizedResponse(c);
 		}
-		return buildPropPatchResponse(
-			c,
-			`/dav/projects/${c.req.param("projectId")}/`,
-		);
+		const read = await readBodyWithLimit(c);
+		if ("error" in read) {
+			return read.error;
+		}
+		const displayName = parseProppatchDisplayName(read.body);
+		const projectId = Number(c.req.param("projectId"));
+		const hrefValue = `/dav/projects/${projectId}/`;
+		if (displayName !== null) {
+			const project = await withDb(c.env, (client) =>
+				updateProjectDisplayName(client, user.id, projectId, displayName),
+			);
+			if (!project) {
+				return c.text("Project not found", 404);
+			}
+			return buildPropPatchResponse(
+				c,
+				hrefValue,
+				projectCollectionProps(project),
+			);
+		}
+		return buildPropPatchResponse(c, hrefValue);
 	};
 
-	app.on("PROPFIND", "/.well-known/caldav", (c) =>
-		c.redirect("/dav/", 301),
-	);
-	app.on("PROPFIND", "/.well-known/caldav/", (c) =>
-		c.redirect("/dav/", 301),
-	);
+	app.on("PROPFIND", "/.well-known/caldav", (c) => c.redirect("/dav/", 301));
+	app.on("PROPFIND", "/.well-known/caldav/", (c) => c.redirect("/dav/", 301));
 
 	app.on("PROPFIND", "/dav", handleEntry);
 	app.on("PROPFIND", "/dav/", handleEntry);
@@ -338,15 +385,15 @@ export function registerCaldavRoutes(app: Hono<{ Bindings: CloudflareBindings }>
 			if (!project) {
 				return c.text("Project not found", 404);
 			}
-		const uid = normalizeUidParam(c.req.param("uid"));
-		if (!uid) {
-			return c.text("Task not found", 404);
-		}
-		const task = await getTaskByUid(client, project.id, uid);
-		if (!task) {
-			return c.text("Task not found", 404);
-		}
-		const calendar = buildCalendarData(project.name, task);
+			const uid = normalizeUidParam(c.req.param("uid"));
+			if (!uid) {
+				return c.text("Task not found", 404);
+			}
+			const task = await getTaskByUid(client, project.id, uid);
+			if (!task) {
+				return c.text("Task not found", 404);
+			}
+			const calendar = buildCalendarData(project.name, task);
 			const etag = `"${task.updatedAt.getTime()}"`;
 			return c.text(calendar, 200, {
 				ETag: etag,
@@ -369,15 +416,15 @@ export function registerCaldavRoutes(app: Hono<{ Bindings: CloudflareBindings }>
 			if (!project) {
 				return c.text("Project not found", 404);
 			}
-		const uid = normalizeUidParam(c.req.param("uid"));
-		if (!uid) {
-			return c.text("Task not found", 404);
-		}
-		const task = await getTaskByUid(client, project.id, uid);
-		if (!task) {
-			return c.text("Task not found", 404);
-		}
-		return buildTaskResponse(c, project, task);
+			const uid = normalizeUidParam(c.req.param("uid"));
+			if (!uid) {
+				return c.text("Task not found", 404);
+			}
+			const task = await getTaskByUid(client, project.id, uid);
+			if (!task) {
+				return c.text("Task not found", 404);
+			}
+			return buildTaskResponse(c, project, task);
 		});
 	});
 
@@ -386,7 +433,11 @@ export function registerCaldavRoutes(app: Hono<{ Bindings: CloudflareBindings }>
 		if (!user) {
 			return buildUnauthorizedResponse(c);
 		}
-		const content = await c.req.text();
+		const read = await readBodyWithLimit(c);
+		if ("error" in read) {
+			return read.error;
+		}
+		const content = read.body;
 		let parsed;
 		try {
 			parsed = parseVtodo(content);
@@ -405,19 +456,19 @@ export function registerCaldavRoutes(app: Hono<{ Bindings: CloudflareBindings }>
 			if (!project) {
 				return c.text("Project not found", 404);
 			}
-		const uid = normalizeUidParam(c.req.param("uid"));
-		if (!uid) {
-			return c.text("Invalid UID", 400);
-		}
-		const existing = await getTaskByUid(client, project.id, uid);
-		const taskInput = {
+			const uid = normalizeUidParam(c.req.param("uid"));
+			if (!uid) {
+				return c.text("Invalid UID", 400);
+			}
+			const existing = await getTaskByUid(client, project.id, uid);
+			const taskInput = {
 				...parsed,
 				projectId: project.id,
 				uid,
 			};
-		if (existing && parsed.description === undefined) {
-			taskInput.description = existing.description;
-		}
+			if (existing && parsed.description === undefined) {
+				taskInput.description = existing.description;
+			}
 			const task = existing
 				? await updateTask(client, user.id, existing.id, taskInput)
 				: await createTask(client, user.id, taskInput);
@@ -444,12 +495,12 @@ export function registerCaldavRoutes(app: Hono<{ Bindings: CloudflareBindings }>
 			if (!project) {
 				return c.text("Project not found", 404);
 			}
-		const uid = normalizeUidParam(c.req.param("uid"));
-		if (!uid) {
-			return c.text("Task not found", 404);
-		}
-		const deleted = await deleteTaskByUid(client, project.id, uid);
-		if (!deleted) {
+			const uid = normalizeUidParam(c.req.param("uid"));
+			if (!uid) {
+				return c.text("Task not found", 404);
+			}
+			const deleted = await deleteTaskByUid(client, project.id, uid);
+			if (!deleted) {
 				console.log(
 					`caldav_delete_not_found projectId=${project.id} uid=${uid}`,
 				);

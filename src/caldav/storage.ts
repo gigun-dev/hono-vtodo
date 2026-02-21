@@ -91,6 +91,35 @@ export async function getProjectById(
 	};
 }
 
+export async function updateProjectDisplayName(
+	client: Client,
+	userId: string,
+	projectId: number,
+	displayName: string,
+): Promise<CaldavProject | null> {
+	const result = await client.query(
+		`update caldav_projects
+		   set name = $1,
+		       ctag = extract(epoch from now() at time zone 'UTC')::bigint * 1000,
+		       updated_at = now()
+		 where id = $2 and owner_id = $3
+		 returning id, name, owner_id, ctag, created_at, updated_at`,
+		[displayName, projectId, userId],
+	);
+	if (result.rows.length === 0) {
+		return null;
+	}
+	const row = result.rows[0];
+	return {
+		id: row.id,
+		name: row.name,
+		ownerId: row.owner_id,
+		ctag: String(row.ctag),
+		createdAt: new Date(row.created_at),
+		updatedAt: new Date(row.updated_at),
+	};
+}
+
 export async function getTasksForProject(
 	client: Client,
 	projectId: number,
